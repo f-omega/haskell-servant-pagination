@@ -75,6 +75,7 @@ library
     , MultiParamTypeClasses
     , OverloadedStrings
     , ParallelListComp
+    , RankNTypes
     , ScopedTypeVariables
     , TupleSections
     , TypeFamilies

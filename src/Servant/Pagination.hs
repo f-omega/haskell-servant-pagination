@@ -1,3 +1,4 @@
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RecordWildCards  #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -117,6 +118,7 @@ module Servant.Pagination
   , applyRange
   ) where
 
+import           Control.Monad      (when)
 import           Data.List          (filter, find, intercalate)
 import           Data.Maybe         (listToMaybe)
 import           Data.Proxy         (Proxy (..))
@@ -358,6 +360,9 @@ type PageHeaders (fields :: [Symbol]) (resource :: *) =
 -- | Accepted Ranges in the `Accept-Ranges` response's header
 data AcceptRanges (fields :: [Symbol]) = AcceptRanges
 
+instance FromHttpApiData (AcceptRanges fields) where
+  parseUrlPiece _ = pure AcceptRanges
+
 instance (KnownSymbol field) => ToHttpApiData (AcceptRanges '[field]) where
   toUrlPiece AcceptRanges =
     Text.pack (symbolVal (Proxy @field))
@@ -379,6 +384,46 @@ instance ToHttpApiData (ContentRange fields res) where
   toUrlPiece (ContentRange start end field) =
     Text.pack (symbolVal field) <> " " <> (encodeText . toUrlPiece) start <> ".." <> (encodeText . toUrlPiece) end
 
+instance MatchContentFields fields res => FromHttpApiData (ContentRange fields res) where
+  parseUrlPiece t = do
+    let (fieldName, rangeWithSpace) = Text.breakOn " " t
+    when (Text.null fieldName) (Left "Missing field name in Content-range header")
+
+    case Text.stripPrefix " " rangeWithSpace of
+      Nothing -> Left "Missing value range in Content-range header"
+      Just range -> do
+        let (start, endWithDots) = Text.breakOn ".." range
+        case Text.stripPrefix ".." endWithDots of
+          Nothing -> Left "Missing end value of range"
+          Just end -> do
+            when (Text.null start) (Left "Missing start value of range")
+
+            matchContentField (Proxy @fields) (Proxy @res) fieldName
+              (\field -> do
+                 startV <- parseUrlPiece start
+                 endV   <- parseUrlPiece end
+                 pure ContentRange { contentRangeStart = startV
+                                   , contentRangeEnd = endV
+                                   , contentRangeField = field })
+              (Left ("'" <> fieldName <> "' not a valid paging field"))
+
+class MatchContentFields (fields :: [ Symbol ]) resource where
+  matchContentField :: Proxy fields -> Proxy resource -> Text
+                    -> (forall field. ( FromHttpApiData (RangeType resource field)
+                                      , ToHttpApiData (RangeType resource field)
+                                      , KnownSymbol field
+                                      ) => Proxy field -> a)
+                    -> a -> a
+
+instance ( FromHttpApiData (RangeType resource field), ToHttpApiData (RangeType resource field)
+         , KnownSymbol field, MatchContentFields fields resource )
+    => MatchContentFields (field ': fields) resource where
+  matchContentField _ resource fieldName onSuccess onFailure
+    | symbolVal (Proxy @field) == Text.unpack fieldName = onSuccess (Proxy @field)
+    | otherwise = matchContentField (Proxy @fields) resource fieldName onSuccess onFailure
+
+instance MatchContentFields '[] resource where
+  matchContentField _ _ _ _ onFailure = onFailure
 
 --
 -- USE RANGES
